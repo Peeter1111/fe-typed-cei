@@ -1,0 +1,45 @@
+use ingot::assets::native
+use ingot::ledger::{Ledger, balance_of, credit, withdraw_and_dispatch}
+
+pub msg AuctionMsg {
+    #[selector = sol("bid()")]
+    Bid,
+    #[selector = sol("claimRefund(address)")]
+    ClaimRefund { to: Address } -> u256,
+    #[selector = sol("refundOf(address)")]
+    RefundOf { owner: Address } -> u256,
+    #[selector = sol("highestBid()")]
+    HighestBid -> u256,
+}
+
+/// Small auction-refund example; settlement of the winning bid is out of scope.
+pub contract RefundAuction uses (ctx: Ctx, call: mut Call) {
+    mut winner: Address,
+    mut high: u256,
+    mut ledger: Ledger,
+
+    recv AuctionMsg {
+        #[payable]
+        Bid uses (ctx, mut winner, mut high, mut ledger) {
+            let amount = ctx.value().as_wei()
+            assert!(amount > high, "bid too low")
+            if high > 0 {
+                credit(owner: winner, amount: high)
+            }
+            winner = ctx.caller()
+            high = amount
+        }
+
+        ClaimRefund { to } -> u256 uses (ctx, mut call, mut ledger) {
+            withdraw_and_dispatch(owner: ctx.caller(), to, asset: native())
+        }
+
+        RefundOf { owner } -> u256 uses (ledger) {
+            balance_of(owner)
+        }
+
+        HighestBid -> u256 uses (high) {
+            high
+        }
+    }
+}

@@ -1,0 +1,62 @@
+use ingot::assets::erc20_asset
+use ingot::ledger::{Ledger, balance_of, credit, withdraw_and_dispatch}
+use std::evm::erc20
+
+msg TokenBalanceQuery {
+    #[selector = sol("balanceOf(address)")]
+    BalanceOf { owner: Address } -> u256,
+}
+
+pub msg TokenVaultMsg {
+    #[selector = sol("deposit(uint256)")]
+    Deposit { amount: u256 } -> u256,
+    #[selector = sol("withdraw(address)")]
+    Withdraw { to: Address } -> u256,
+    #[selector = sol("balanceOf(address)")]
+    BalanceOf { owner: Address } -> u256,
+}
+
+/// ERC20 deposits credit received tokens, not the caller's requested amount.
+pub contract TokenVault uses (ctx: Ctx, call: mut Call) {
+    token: Address,
+    mut ledger: Ledger,
+
+    init(token_: Address) uses (mut token) { token = token_ }
+
+    recv TokenVaultMsg {
+        Deposit { amount } -> u256 uses (ctx, mut call, token, mut ledger) {
+            let before: u256 = call
+                .call(
+                    addr: token,
+                    gas: ctx.gas(),
+                    value: Wei::zero(),
+                    message: TokenBalanceQuery::BalanceOf { owner: ctx.address() },
+                )
+            erc20::safe_transfer_from(
+                token: token,
+                owner: ctx.caller(),
+                receiver: ctx.address(),
+                amount,
+            )
+            let after: u256 = call
+                .call(
+                    addr: token,
+                    gas: ctx.gas(),
+                    value: Wei::zero(),
+                    message: TokenBalanceQuery::BalanceOf { owner: ctx.address() },
+                )
+            assert!(after > before, "no tokens received")
+            let received = after - before
+            credit(owner: ctx.caller(), amount: received)
+            received
+        }
+
+        Withdraw { to } -> u256 uses (ctx, mut call, token, mut ledger) {
+            withdraw_and_dispatch(owner: ctx.caller(), to, asset: erc20_asset(token))
+        }
+
+        BalanceOf { owner } -> u256 uses (ledger) {
+            balance_of(owner)
+        }
+    }
+}
