@@ -1,15 +1,19 @@
 use ingot::guarded::GuardedVault
 use ingot::manual::ManualCeiVault
+use ingot::transient::TransientGuardVault
 use ingot::vulnerable::VulnerableVault
 use std::evm::{StorageMap, ether}
 use typed_cei::{
+    AuctionMsg,
     Ledger,
+    RefundAuction,
+    TokenVault,
+    TokenVaultMsg,
     TypedVault,
     VaultMsg,
     balance_of,
     commit_withdraw,
     credit,
-    erc20_asset,
     native,
 }
 
@@ -18,30 +22,67 @@ msg AttackMsg {
     Attack { rounds: u256 },
     #[selector = sol("attackSplit(uint256,uint256)")]
     AttackSplit { rounds: u256, amount_a: u256 },
+    #[selector = sol("attackCross(uint256,uint256)")]
+    AttackCross { rounds: u256, amount_a: u256 },
+    #[selector = sol("attackReadOnly()")]
+    AttackReadOnly,
     #[selector = sol("attempts()")]
     Attempts -> u256,
     #[selector = sol("successes()")]
     Successes -> u256,
+    #[selector = sol("observedBalance()")]
+    ObservedBalance -> u256,
+    #[selector = sol("reads()")]
+    Reads -> u256,
 }
 
 msg MockTokenMsg {
     #[selector = sol("transfer(address,uint256)")]
     Transfer { to: Address, amount: u256 } -> bool,
+    #[selector = sol("transferFrom(address,address,uint256)")]
+    TransferFrom { owner: Address, to: Address, amount: u256 } -> bool,
+    #[selector = sol("approve(address,uint256)")]
+    Approve { spender: Address, amount: u256 } -> bool,
     #[selector = sol("balanceOf(address)")]
     BalanceOf { owner: Address } -> u256,
 }
 
 contract MockToken uses (ctx: Ctx) {
     mut balances: StorageMap<Address, u256>,
+    mut allowances: StorageMap<(Address, Address), u256>,
+    fee_bps: u256,
 
-    init(owner: Address, supply: u256) uses (mut balances) { balances[owner] = supply }
+    init(owner: Address, supply: u256, fee: u256)
+    uses (mut balances, mut fee_bps)
+    {
+        assert!(fee <= 10000)
+        balances[owner] = supply
+        fee_bps = fee
+    }
 
     recv MockTokenMsg {
-        Transfer { to, amount } -> bool uses (ctx, mut balances) {
+        Transfer { to, amount } -> bool uses (ctx, mut balances, fee_bps) {
             let owner = ctx.caller()
             assert!(balances[owner] >= amount)
             balances[owner] -= amount
-            balances[to] += amount
+            balances[to] += amount - (amount * fee_bps / 10000)
+            true
+        }
+
+        Approve { spender, amount } -> bool uses (ctx, mut allowances) {
+            allowances[(ctx.caller(), spender)] = amount
+            true
+        }
+
+        TransferFrom { owner, to, amount } -> bool
+        uses (ctx, mut balances, mut allowances, fee_bps)
+        {
+            let spender = ctx.caller()
+            assert!(allowances[(owner, spender)] >= amount)
+            assert!(balances[owner] >= amount)
+            allowances[(owner, spender)] -= amount
+            balances[owner] -= amount
+            balances[to] += amount - (amount * fee_bps / 10000)
             true
         }
 
@@ -51,29 +92,30 @@ contract MockToken uses (ctx: Ctx) {
     }
 }
 
-msg TokenVaultMsg {
-    #[selector = sol("credit(uint256)")]
-    Credit { amount: u256 },
-    #[selector = sol("withdraw(address)")]
-    Withdraw { to: Address } -> u256,
+msg BidderMsg {
+    #[selector = sol("bidFor(address)")]
+    BidFor { auction: Address },
 }
 
-contract TokenPayoutDemo uses (ctx: Ctx, call: mut Call) {
-    token: Address,
-    mut ledger: Ledger,
-
-    init(token_: Address) uses (mut token) { token = token_ }
-
-    recv TokenVaultMsg {
-        Credit { amount } uses (ctx, mut ledger) {
-            credit(owner: ctx.caller(), amount)
+contract Bidder uses (ctx: Ctx, call: mut Call) {
+    recv BidderMsg {
+        #[payable]
+        BidFor { auction } uses (ctx, mut call) {
+            call.call(
+                addr: auction,
+                gas: ctx.gas(),
+                value: ctx.value(),
+                message: AuctionMsg::Bid {},
+            )
         }
+    }
+}
 
-        Withdraw { to } -> u256 uses (ctx, mut call, token, mut ledger) {
-            let payout = commit_withdraw(owner: ctx.caller(), to, asset: erc20_asset(token))
-            let amount = payout.amount()
-            payout.dispatch()
-            amount
+contract RejectReceiver {
+    recv {
+        #[payable]
+        _ {
+            assert!(false, "reject payout")
         }
     }
 }
@@ -110,15 +152,28 @@ contract DiscardVault uses (ctx: Ctx) {
 
 contract ReentrantAttacker uses (ctx: Ctx, call: mut Call) {
     target: Address,
+    mut mode: u256,
+    mut split_amount: u256,
     mut remaining: u256,
     mut attempts: u256,
     mut successes: u256,
+    mut observed_balance: u256,
+    mut reads: u256,
 
     init(target_: Address) uses (mut target) { target = target_ }
 
     recv AttackMsg {
         #[payable]
-        Attack { rounds } uses (ctx, mut call, target, mut remaining, mut attempts, mut successes) {
+        Attack { rounds } uses (
+            ctx,
+            mut call,
+            target,
+            mut mode,
+            mut remaining,
+            mut attempts,
+            mut successes,
+        ) {
+            mode = 0
             remaining = rounds
             attempts = 0
             successes = 0
@@ -145,7 +200,9 @@ contract ReentrantAttacker uses (ctx: Ctx, call: mut Call) {
             mut remaining,
             mut attempts,
             mut successes,
+            mut mode,
         ) {
+            mode = 0
             remaining = rounds
             attempts = 0
             successes = 0
@@ -168,6 +225,74 @@ contract ReentrantAttacker uses (ctx: Ctx, call: mut Call) {
                 )
         }
 
+        #[payable]
+        AttackCross { rounds, amount_a } uses (
+            ctx,
+            mut call,
+            target,
+            mut mode,
+            mut split_amount,
+            mut remaining,
+            mut attempts,
+            mut successes,
+            mut observed_balance,
+            mut reads,
+        ) {
+            mode = 1
+            split_amount = amount_a
+            remaining = rounds
+            attempts = 0
+            successes = 0
+            observed_balance = 0
+            reads = 0
+            call.call(
+                addr: target,
+                gas: ctx.gas(),
+                value: ctx.value(),
+                message: VaultMsg::Deposit {},
+            )
+            let _: u256 = call
+                .call(
+                    addr: target,
+                    gas: ctx.gas(),
+                    value: Wei::zero(),
+                    message: VaultMsg::Withdraw { to: ctx.address() },
+                )
+        }
+
+        #[payable]
+        AttackReadOnly uses (
+            ctx,
+            mut call,
+            target,
+            mut mode,
+            mut remaining,
+            mut attempts,
+            mut successes,
+            mut observed_balance,
+            mut reads,
+        ) {
+            mode = 2
+            remaining = 1
+            attempts = 0
+            successes = 0
+            observed_balance = 0
+            reads = 0
+            call.call(
+                addr: target,
+                gas: ctx.gas(),
+                value: ctx.value(),
+                message: VaultMsg::Deposit {},
+            )
+            let _: u256 = call
+                .call(
+                    addr: target,
+                    gas: ctx.gas(),
+                    value: Wei::zero(),
+                    message: VaultMsg::Withdraw { to: ctx.address() },
+                )
+        }
+
         Attempts -> u256 uses (attempts) {
             attempts
         }
@@ -175,23 +300,74 @@ contract ReentrantAttacker uses (ctx: Ctx, call: mut Call) {
         Successes -> u256 uses (successes) {
             successes
         }
+
+        ObservedBalance -> u256 uses (observed_balance) {
+            observed_balance
+        }
+
+        Reads -> u256 uses (reads) {
+            reads
+        }
     }
 
     recv {
         #[payable]
-        _ uses (ctx, mut call, target, mut remaining, mut attempts, mut successes) {
+        _ uses (
+            ctx,
+            mut call,
+            target,
+            mode,
+            split_amount,
+            mut remaining,
+            mut attempts,
+            mut successes,
+            mut observed_balance,
+            mut reads,
+        ) {
             if remaining > 0 {
                 remaining -= 1
-                attempts += 1
-                let outcome = call
-                    .try_call(
-                        addr: target,
-                        gas: ctx.gas(),
-                        value: Wei::zero(),
-                        message: VaultMsg::Withdraw { to: ctx.address() },
-                    )
-                if outcome.success() {
-                    successes += 1
+                if mode != 0 {
+                    let visible: u256 = call
+                        .call(
+                            addr: target,
+                            gas: ctx.gas(),
+                            value: Wei::zero(),
+                            message: VaultMsg::BalanceOf { owner: ctx.address() },
+                        )
+                    if reads == 0 {
+                        observed_balance = visible
+                    }
+                    reads += 1
+                }
+                if mode != 2 {
+                    attempts += 1
+                    if mode == 1 {
+                        let outcome = call
+                            .try_call(
+                                addr: target,
+                                gas: ctx.gas(),
+                                value: Wei::zero(),
+                                message: VaultMsg::WithdrawSplit {
+                                    to_a: ctx.address(),
+                                    to_b: ctx.address(),
+                                    amount_a: split_amount,
+                                },
+                            )
+                        if outcome.success() {
+                            successes += 1
+                        }
+                    } else {
+                        let outcome = call
+                            .try_call(
+                                addr: target,
+                                gas: ctx.gas(),
+                                value: Wei::zero(),
+                                message: VaultMsg::Withdraw { to: ctx.address() },
+                            )
+                        if outcome.success() {
+                            successes += 1
+                        }
+                    }
                 }
             }
         }
@@ -199,7 +375,7 @@ contract ReentrantAttacker uses (ctx: Ctx, call: mut Call) {
 }
 
 #[event]
-struct GasSample { kind: u256, gas: u256 }
+struct GasSample { kind: u256, gas: u256, run_gas: u256 }
 
 #[test(balance = 10_000_000_000_000_000_000)]
 fn typed_vault_deposit_withdraws_once() uses (evm: mut Evm) {
@@ -229,6 +405,35 @@ fn typed_vault_deposit_withdraws_once() uses (evm: mut Evm) {
         )
             .success(),
     )
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn one_call_withdraw_reverts_the_debit_on_failed_send() uses (evm: mut Evm) {
+    let vault = evm.create2<TypedVault>(value: Wei::zero(), args: (), salt: 92)
+    let rejector = evm.create2<RejectReceiver>(value: Wei::zero(), args: (), salt: 93)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(1),
+        message: VaultMsg::Deposit {},
+    )
+    let outcome = evm
+        .try_call(
+            addr: vault,
+            gas: 300000,
+            value: Wei::zero(),
+            message: VaultMsg::Withdraw { to: rejector },
+        )
+    assert!(!outcome.success())
+    let claim: u256 = evm
+        .call(
+            addr: vault,
+            gas: 100000,
+            value: Wei::zero(),
+            message: VaultMsg::BalanceOf { owner: evm.address() },
+        )
+    assert!(claim == ether(1).as_wei())
+    assert!(evm.balance(vault) == ether(1))
 }
 
 #[test(balance = 10_000_000_000_000_000_000)]
@@ -325,24 +530,38 @@ fn typed_split_commits_before_both_callbacks() uses (evm: mut Evm) {
 }
 
 #[test]
-fn generic_payout_dispatches_erc20_style_asset() uses (evm: mut Evm) {
+fn erc20_vault_receives_and_withdraws_full_amount() uses (evm: mut Evm) {
     let supply: u256 = 1000
-    let token = evm.create2<MockToken>(value: Wei::zero(), args: (evm.address(), supply), salt: 3)
-    let vault = evm.create2<TokenPayoutDemo>(value: Wei::zero(), args: (token,), salt: 4)
-    let moved: bool = evm
+    let token = evm
+        .create2<MockToken>(
+            value: Wei::zero(),
+            args: (evm.address(), supply, 0),
+            salt: 3,
+        )
+    let vault = evm.create2<TokenVault>(value: Wei::zero(), args: (token,), salt: 4)
+    let approved: bool = evm
         .call(
             addr: token,
             gas: 300000,
             value: Wei::zero(),
-            message: MockTokenMsg::Transfer { to: vault, amount: 250 },
+            message: MockTokenMsg::Approve { spender: vault, amount: 250 },
         )
-    assert!(moved)
-    evm.call(
-        addr: vault,
-        gas: 100000,
-        value: Wei::zero(),
-        message: TokenVaultMsg::Credit { amount: 250 },
-    )
+    assert!(approved)
+    let received: u256 = evm
+        .call(
+            addr: vault,
+            gas: 500000,
+            value: Wei::zero(),
+            message: TokenVaultMsg::Deposit { amount: 250 },
+        )
+    let claim: u256 = evm
+        .call(
+            addr: vault,
+            gas: 100000,
+            value: Wei::zero(),
+            message: TokenVaultMsg::BalanceOf { owner: evm.address() },
+        )
+    assert!(received == 250 && claim == 250)
 
     let receiver = Address::new(0xeeee)
     let paid: u256 = evm
@@ -361,6 +580,140 @@ fn generic_payout_dispatches_erc20_style_asset() uses (evm: mut Evm) {
         )
     assert!(paid == 250)
     assert!(receiver_balance == 250)
+}
+
+#[test]
+fn erc20_fee_on_transfer_credits_only_arrival() uses (evm: mut Evm) {
+    let token = evm
+        .create2<MockToken>(
+            value: Wei::zero(),
+            args: (evm.address(), 1000, 1000),
+            salt: 60,
+        )
+    let vault = evm.create2<TokenVault>(value: Wei::zero(), args: (token,), salt: 61)
+    let _: bool = evm
+        .call(
+            addr: token,
+            gas: 200000,
+            value: Wei::zero(),
+            message: MockTokenMsg::Approve { spender: vault, amount: 100 },
+        )
+    let received: u256 = evm
+        .call(
+            addr: vault,
+            gas: 500000,
+            value: Wei::zero(),
+            message: TokenVaultMsg::Deposit { amount: 100 },
+        )
+    let claim: u256 = evm
+        .call(
+            addr: vault,
+            gas: 100000,
+            value: Wei::zero(),
+            message: TokenVaultMsg::BalanceOf { owner: evm.address() },
+        )
+    let held: u256 = evm
+        .call(
+            addr: token,
+            gas: 100000,
+            value: Wei::zero(),
+            message: MockTokenMsg::BalanceOf { owner: vault },
+        )
+    assert!(received == 90 && claim == 90 && held == 90)
+
+    let receiver = Address::new(0xdead)
+    let paid: u256 = evm
+        .call(
+            addr: vault,
+            gas: 500000,
+            value: Wei::zero(),
+            message: TokenVaultMsg::Withdraw { to: receiver },
+        )
+    let delivered: u256 = evm
+        .call(
+            addr: token,
+            gas: 100000,
+            value: Wei::zero(),
+            message: MockTokenMsg::BalanceOf { owner: receiver },
+        )
+    let held_after: u256 = evm
+        .call(
+            addr: token,
+            gas: 100000,
+            value: Wei::zero(),
+            message: MockTokenMsg::BalanceOf { owner: vault },
+        )
+    assert!(paid == 90 && delivered == 81 && held_after == 0)
+}
+
+#[test]
+fn erc20_zero_arrival_reverts_without_credit() uses (evm: mut Evm) {
+    let token = evm
+        .create2<MockToken>(
+            value: Wei::zero(),
+            args: (evm.address(), 1000, 10000),
+            salt: 94,
+        )
+    let vault = evm.create2<TokenVault>(value: Wei::zero(), args: (token,), salt: 95)
+    let _: bool = evm
+        .call(
+            addr: token,
+            gas: 200000,
+            value: Wei::zero(),
+            message: MockTokenMsg::Approve { spender: vault, amount: 100 },
+        )
+    let outcome = evm
+        .try_call(
+            addr: vault,
+            gas: 500000,
+            value: Wei::zero(),
+            message: TokenVaultMsg::Deposit { amount: 100 },
+        )
+    assert!(!outcome.success())
+    let claim: u256 = evm
+        .call(
+            addr: vault,
+            gas: 100000,
+            value: Wei::zero(),
+            message: TokenVaultMsg::BalanceOf { owner: evm.address() },
+        )
+    assert!(claim == 0)
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn auction_outbidder_claims_refund() uses (evm: mut Evm) {
+    let auction = evm.create2<RefundAuction>(value: Wei::zero(), args: (), salt: 70)
+    evm.call(
+        addr: auction,
+        gas: 200000,
+        value: ether(1),
+        message: AuctionMsg::Bid {},
+    )
+    let bidder = evm.create2<Bidder>(value: Wei::zero(), args: (), salt: 71)
+    evm.call(
+        addr: bidder,
+        gas: 300000,
+        value: ether(2),
+        message: BidderMsg::BidFor { auction },
+    )
+    let refund: u256 = evm
+        .call(
+            addr: auction,
+            gas: 100000,
+            value: Wei::zero(),
+            message: AuctionMsg::RefundOf { owner: evm.address() },
+        )
+    assert!(refund == ether(1).as_wei())
+    let paid: u256 = evm
+        .call(
+            addr: auction,
+            gas: 300000,
+            value: Wei::zero(),
+            message: AuctionMsg::ClaimRefund { to: Address::new(0xfeed) },
+        )
+    assert!(paid == ether(1).as_wei())
+    assert!(evm.balance(auction) == ether(2))
+    assert!(evm.balance(Address::new(0xfeed)) == ether(1))
 }
 
 #[test(balance = 10_000_000_000_000_000_000)]
@@ -541,6 +894,7 @@ fn manual_cei_also_blocks_attack() uses (evm: mut Evm) {
 
 #[test(balance = 10_000_000_000_000_000_000)]
 fn gas_typed_withdraw() uses (evm: mut Evm, log: mut Log) {
+    let start = evm.gas()
     let vault = evm.create2<TypedVault>(value: Wei::zero(), args: (), salt: 40)
     evm.call(
         addr: vault,
@@ -556,11 +910,15 @@ fn gas_typed_withdraw() uses (evm: mut Evm, log: mut Log) {
             value: Wei::zero(),
             message: VaultMsg::Withdraw { to: Address::new(0x4444) },
         )
-    log.emit(GasSample { kind: 1, gas: before - evm.gas() })
+    let end = evm.gas()
+    log.emit(
+        GasSample { kind: 1, gas: before - end, run_gas: start - end },
+    )
 }
 
 #[test(balance = 10_000_000_000_000_000_000)]
 fn gas_guarded_withdraw() uses (evm: mut Evm, log: mut Log) {
+    let start = evm.gas()
     let vault = evm.create2<GuardedVault>(value: Wei::zero(), args: (), salt: 41)
     evm.call(
         addr: vault,
@@ -576,11 +934,15 @@ fn gas_guarded_withdraw() uses (evm: mut Evm, log: mut Log) {
             value: Wei::zero(),
             message: VaultMsg::Withdraw { to: Address::new(0x4444) },
         )
-    log.emit(GasSample { kind: 2, gas: before - evm.gas() })
+    let end = evm.gas()
+    log.emit(
+        GasSample { kind: 2, gas: before - end, run_gas: start - end },
+    )
 }
 
 #[test(balance = 10_000_000_000_000_000_000)]
 fn gas_manual_cei_withdraw() uses (evm: mut Evm, log: mut Log) {
+    let start = evm.gas()
     let vault = evm.create2<ManualCeiVault>(value: Wei::zero(), args: (), salt: 42)
     evm.call(
         addr: vault,
@@ -596,5 +958,223 @@ fn gas_manual_cei_withdraw() uses (evm: mut Evm, log: mut Log) {
             value: Wei::zero(),
             message: VaultMsg::Withdraw { to: Address::new(0x4444) },
         )
-    log.emit(GasSample { kind: 3, gas: before - evm.gas() })
+    let end = evm.gas()
+    log.emit(
+        GasSample { kind: 3, gas: before - end, run_gas: start - end },
+    )
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn gas_transient_guard_withdraw() uses (evm: mut Evm, log: mut Log) {
+    let start = evm.gas()
+    let vault = evm.create2<TransientGuardVault>(value: Wei::zero(), args: (), salt: 43)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(1),
+        message: VaultMsg::Deposit {},
+    )
+    let before = evm.gas()
+    let _: u256 = evm
+        .call(
+            addr: vault,
+            gas: 300000,
+            value: Wei::zero(),
+            message: VaultMsg::Withdraw { to: Address::new(0x4444) },
+        )
+    let end = evm.gas()
+    log.emit(
+        GasSample { kind: 4, gas: before - end, run_gas: start - end },
+    )
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn transient_guard_blocks_cross_function() uses (evm: mut Evm) {
+    let vault = evm.create2<TransientGuardVault>(value: Wei::zero(), args: (), salt: 91)
+    check_cross_function(
+        vault,
+        expected_attempts: 1,
+        expected_successes: 0,
+        expected_view: ether(1).as_wei(),
+        expected_eth: ether(2),
+    )
+}
+
+fn check_cross_function(
+    vault: Address,
+    expected_attempts: u256,
+    expected_successes: u256,
+    expected_view: u256,
+    expected_eth: Wei,
+)
+uses (evm: mut Evm)
+{
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(2),
+        message: VaultMsg::Deposit {},
+    )
+    let attacker = evm.create2<ReentrantAttacker>(value: Wei::zero(), args: (vault,), salt: 80)
+    evm.call(
+        addr: attacker,
+        gas: 1500000,
+        value: ether(1),
+        message: AttackMsg::AttackCross { rounds: 2, amount_a: ether(1).as_wei() / 2 },
+    )
+    let attempts: u256 = evm
+        .call(
+            addr: attacker,
+            gas: 100000,
+            value: Wei::zero(),
+            message: AttackMsg::Attempts {},
+        )
+    let successes: u256 = evm
+        .call(
+            addr: attacker,
+            gas: 100000,
+            value: Wei::zero(),
+            message: AttackMsg::Successes {},
+        )
+    let seen: u256 = evm
+        .call(
+            addr: attacker,
+            gas: 100000,
+            value: Wei::zero(),
+            message: AttackMsg::ObservedBalance {},
+        )
+    let reads: u256 = evm
+        .call(
+            addr: attacker,
+            gas: 100000,
+            value: Wei::zero(),
+            message: AttackMsg::Reads {},
+        )
+    let victim_claim: u256 = evm
+        .call(
+            addr: vault,
+            gas: 100000,
+            value: Wei::zero(),
+            message: VaultMsg::BalanceOf { owner: evm.address() },
+        )
+    assert!(attempts == expected_attempts)
+    assert!(successes == expected_successes)
+    assert!(reads == expected_attempts)
+    assert!(seen == expected_view)
+    assert!(victim_claim == ether(2).as_wei())
+    assert!(evm.balance(vault) == expected_eth)
+    assert!(evm.balance(attacker) == ether(3) - expected_eth)
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn cross_function_typed() uses (evm: mut Evm) {
+    let vault = evm.create2<TypedVault>(value: Wei::zero(), args: (), salt: 81)
+    check_cross_function(
+        vault,
+        expected_attempts: 1,
+        expected_successes: 0,
+        expected_view: 0,
+        expected_eth: ether(2),
+    )
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn cross_function_manual() uses (evm: mut Evm) {
+    let vault = evm.create2<ManualCeiVault>(value: Wei::zero(), args: (), salt: 82)
+    check_cross_function(
+        vault,
+        expected_attempts: 1,
+        expected_successes: 0,
+        expected_view: 0,
+        expected_eth: ether(2),
+    )
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn cross_function_guarded() uses (evm: mut Evm) {
+    let vault = evm.create2<GuardedVault>(value: Wei::zero(), args: (), salt: 83)
+    check_cross_function(
+        vault,
+        expected_attempts: 1,
+        expected_successes: 0,
+        expected_view: ether(1).as_wei(),
+        expected_eth: ether(2),
+    )
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn cross_function_vulnerable() uses (evm: mut Evm) {
+    let vault = evm.create2<VulnerableVault>(value: Wei::zero(), args: (), salt: 84)
+    check_cross_function(
+        vault,
+        expected_attempts: 2,
+        expected_successes: 2,
+        expected_view: ether(1).as_wei(),
+        expected_eth: Wei::zero(),
+    )
+}
+
+fn check_read_only(vault: Address, expected_view: u256) uses (evm: mut Evm) {
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(2),
+        message: VaultMsg::Deposit {},
+    )
+    let attacker = evm.create2<ReentrantAttacker>(value: Wei::zero(), args: (vault,), salt: 85)
+    evm.call(
+        addr: attacker,
+        gas: 600000,
+        value: ether(1),
+        message: AttackMsg::AttackReadOnly {},
+    )
+    let seen: u256 = evm
+        .call(
+            addr: attacker,
+            gas: 100000,
+            value: Wei::zero(),
+            message: AttackMsg::ObservedBalance {},
+        )
+    let reads: u256 = evm
+        .call(
+            addr: attacker,
+            gas: 100000,
+            value: Wei::zero(),
+            message: AttackMsg::Reads {},
+        )
+    let attempts: u256 = evm
+        .call(
+            addr: attacker,
+            gas: 100000,
+            value: Wei::zero(),
+            message: AttackMsg::Attempts {},
+        )
+    assert!(reads == 1 && attempts == 0)
+    assert!(seen == expected_view)
+    assert!(evm.balance(vault) == ether(2))
+    assert!(evm.balance(attacker) == ether(1))
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn readonly_callback_typed() uses (evm: mut Evm) {
+    let vault = evm.create2<TypedVault>(value: Wei::zero(), args: (), salt: 86)
+    check_read_only(vault, expected_view: 0)
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn readonly_callback_manual() uses (evm: mut Evm) {
+    let vault = evm.create2<ManualCeiVault>(value: Wei::zero(), args: (), salt: 87)
+    check_read_only(vault, expected_view: 0)
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn readonly_callback_guarded() uses (evm: mut Evm) {
+    let vault = evm.create2<GuardedVault>(value: Wei::zero(), args: (), salt: 88)
+    check_read_only(vault, expected_view: ether(1).as_wei())
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn readonly_callback_vulnerable() uses (evm: mut Evm) {
+    let vault = evm.create2<VulnerableVault>(value: Wei::zero(), args: (), salt: 89)
+    check_read_only(vault, expected_view: ether(1).as_wei())
 }
