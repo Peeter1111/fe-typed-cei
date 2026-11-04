@@ -48,6 +48,17 @@ uses (ledger: mut Ledger)
     Payout::new(asset, to, amount)
 }
 
+/// The simple path: commit and send in the same call, so no payout escapes.
+/// A failed interaction reverts the debit as part of the transaction.
+pub fn withdraw_and_dispatch<A: Asset>(owner: Address, to: Address, asset: own A) -> u256
+uses (ledger: mut Ledger, ctx: Ctx, call: mut Call)
+{
+    let payout = commit_withdraw(owner, to, asset)
+    let amount = payout.amount()
+    payout.dispatch()
+    amount
+}
+
 /// Commit one debit and mint two independently consumable interactions.
 pub fn commit_split<A: Asset, B: Asset>(
     owner: Address,

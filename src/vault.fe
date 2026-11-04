@@ -1,5 +1,5 @@
 use ingot::assets::native
-use ingot::ledger::{Ledger, balance_of, commit_split, commit_withdraw, credit}
+use ingot::ledger::{Ledger, balance_of, commit_split, credit, withdraw_and_dispatch}
 
 pub msg VaultMsg {
     #[selector = sol("deposit()")]
@@ -23,10 +23,7 @@ pub contract TypedVault uses (ctx: Ctx, call: mut Call) {
         }
 
         Withdraw { to } -> u256 uses (ctx, mut call, mut ledger) {
-            let payout = commit_withdraw(owner: ctx.caller(), to, asset: native())
-            let amount = payout.amount()
-            payout.dispatch()
-            amount
+            withdraw_and_dispatch(owner: ctx.caller(), to, asset: native())
         }
 
         WithdrawSplit { to_a, to_b, amount_a } -> u256
