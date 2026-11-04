@@ -1,85 +1,46 @@
-// Run the tests with `fe test`.
-
-use ingot::{Vault, VaultMsg}
-use std::evm::{days, ether}
+use ingot::{TypedVault, VaultMsg}
+use std::evm::ether
 
 #[test(balance = 10_000_000_000_000_000_000)]
-fn deposit_is_locked() uses (evm: mut Evm) {
-    let vault = evm.create2<Vault>(value: Wei::zero(), args: (days(7),), salt: 0)
-
-    let unlock: Timestamp = evm
+fn typed_vault_deposit_withdraws_once() uses (evm: mut Evm) {
+    let vault = evm.create2<TypedVault>(value: Wei::zero(), args: (), salt: 1)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(1),
+        message: VaultMsg::Deposit {},
+    )
+    let to = Address::new(0x1111)
+    let amount: u256 = evm
         .call(
             addr: vault,
-            gas: 200000,
-            value: ether(1),
-            message: VaultMsg::Deposit {},
-        )
-    let balance: Wei = evm
-        .call(
-            addr: vault,
-            gas: 100000,
+            gas: 300000,
             value: Wei::zero(),
-            message: VaultMsg::BalanceOf { owner: evm.address() },
+            message: VaultMsg::Withdraw { to },
         )
-    assert!(balance == ether(1))
-
-    let stored: Timestamp = evm
-        .call(
-            addr: vault,
-            gas: 100000,
-            value: Wei::zero(),
-            message: VaultMsg::UnlockTime { owner: evm.address() },
-        )
-    assert!(stored == unlock)
-}
-
-#[test(should_revert, balance = 10_000_000_000_000_000_000)]
-fn withdraw_before_unlock_reverts() uses (evm: mut Evm) {
-    let vault = evm.create2<Vault>(value: Wei::zero(), args: (days(7),), salt: 0)
-    let _: Timestamp = evm
-        .call(
-            addr: vault,
-            gas: 200000,
-            value: ether(1),
-            message: VaultMsg::Deposit {},
-        )
-    let _: Wei = evm
-        .call(
-            addr: vault,
-            gas: 200000,
-            value: Wei::zero(),
-            message: VaultMsg::Withdraw { to: evm.address() },
-        )
+    assert!(amount == ether(1).as_wei())
+    assert!(evm.balance(to) == ether(1))
 }
 
 #[test(balance = 10_000_000_000_000_000_000)]
-fn withdraw_after_unlock() uses (evm: mut Evm) {
-    // Without a lock period, a deposit can be withdrawn right away.
-    let vault = evm.create2<Vault>(value: Wei::zero(), args: (Duration::zero(),), salt: 0)
-    let _: Timestamp = evm
+fn typed_vault_split_is_committed_before_both_calls() uses (evm: mut Evm) {
+    let vault = evm.create2<TypedVault>(value: Wei::zero(), args: (), salt: 2)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(2),
+        message: VaultMsg::Deposit {},
+    )
+    let a = Address::new(0xaaaa)
+    let b = Address::new(0xbbbb)
+    let total: u256 = evm
         .call(
             addr: vault,
-            gas: 200000,
-            value: ether(1),
-            message: VaultMsg::Deposit {},
-        )
-
-    let payee = Address::new(0x1234)
-    let withdrawn: Wei = evm
-        .call(
-            addr: vault,
-            gas: 200000,
+            gas: 400000,
             value: Wei::zero(),
-            message: VaultMsg::Withdraw { to: payee },
+            message: VaultMsg::WithdrawSplit { to_a: a, to_b: b, amount_a: ether(1).as_wei() / 2 },
         )
-    assert!(withdrawn == ether(1))
-    assert!(evm.balance(payee) == ether(1))
-    let balance: Wei = evm
-        .call(
-            addr: vault,
-            gas: 100000,
-            value: Wei::zero(),
-            message: VaultMsg::BalanceOf { owner: evm.address() },
-        )
-    assert!(balance == Wei::zero())
+    assert!(total == ether(2).as_wei())
+    assert!(evm.balance(a) == ether(1) / 2)
+    assert!(evm.balance(b) == ether(1) + ether(1) / 2)
 }

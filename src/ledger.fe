@@ -1,0 +1,70 @@
+use ingot::assets::Asset
+use std::evm::StorageMap
+
+/// Accounting state. Only this module can construct `Payout` values.
+pub struct Ledger { balances: StorageMap<Address, u256> }
+
+/// Authority to perform one interaction that has already been accounted for.
+///
+/// The fields are intentionally private. `#[must_use]` catches an immediately
+/// discarded payout, while ownership prevents dispatching the same value twice.
+#[must_use]
+pub struct Payout<A> { asset: A, to: Address, amount: u256 }
+
+impl<A> Payout<A> {
+    fn new(asset: own A, to: Address, amount: u256) -> Self {
+        Payout { asset, to, amount }
+    }
+
+    pub fn amount(self) -> u256 {
+        self.amount
+    }
+}
+
+impl<A: Asset> Payout<A> {
+    /// Consume the committed payout and perform the external interaction.
+    /// No `Ledger` effect is present here.
+    pub fn dispatch(own self) uses A::E {
+        self.asset.send(to: self.to, amount: self.amount)
+    }
+}
+
+pub fn balance_of(owner: Address) -> u256 uses (ledger: Ledger) {
+    ledger.balances[owner]
+}
+
+pub fn credit(owner: Address, amount: u256) uses (ledger: mut Ledger) {
+    assert!(amount > 0, "zero deposit")
+    ledger.balances[owner] += amount
+}
+
+/// Debit first, then return the only value the payout layer accepts.
+pub fn commit_withdraw<A>(owner: Address, to: Address, asset: own A) -> Payout<A>
+uses (ledger: mut Ledger)
+{
+    let amount = ledger.balances[owner]
+    assert!(amount > 0, "nothing to withdraw")
+    ledger.balances[owner] = 0
+    Payout::new(asset, to, amount)
+}
+
+/// Commit one debit and mint two independently consumable interactions.
+pub fn commit_split<A, B>(
+    owner: Address,
+    to_a: Address,
+    to_b: Address,
+    amount_a: u256,
+    asset_a: own A,
+    asset_b: own B,
+) -> (Payout<A>, Payout<B>)
+uses (ledger: mut Ledger)
+{
+    let total = ledger.balances[owner]
+    assert!(total > 0, "nothing to withdraw")
+    assert!(amount_a <= total, "split exceeds balance")
+    ledger.balances[owner] = 0
+    (
+        Payout::new(asset: asset_a, to: to_a, amount: amount_a),
+        Payout::new(asset: asset_b, to: to_b, amount: total - amount_a),
+    )
+}

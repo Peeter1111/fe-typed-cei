@@ -1,0 +1,48 @@
+use ingot::vault::VaultMsg
+use std::evm::StorageMap
+use std::evm::wei
+
+/// Deliberately wrong control: interaction happens before the debit.
+/// Fe accepts this because the copied `amount` closes the storage read before CALL.
+pub contract VulnerableVault uses (ctx: Ctx, call: mut Call) {
+    mut balances: StorageMap<Address, u256>,
+
+    recv VaultMsg {
+        #[payable]
+        Deposit uses (ctx, mut balances) {
+            balances[ctx.caller()] += ctx.value().as_wei()
+        }
+
+        Withdraw { to } -> u256 uses (ctx, mut call, mut balances) {
+            let owner = ctx.caller()
+            let amount = balances[owner]
+            assert!(amount > 0, "nothing to withdraw")
+            assert!(
+                call.send_value(addr: to, gas: ctx.gas(), value: wei(amount)).success(),
+                "native payout failed",
+            )
+            balances[owner] = 0
+            amount
+        }
+
+        WithdrawSplit { to_a, to_b, amount_a } -> u256
+        uses (ctx, mut call, mut balances)
+        {
+            let owner = ctx.caller()
+            let total = balances[owner]
+            assert!(total > 0 && amount_a <= total)
+            assert!(
+                call.send_value(addr: to_a, gas: ctx.gas(), value: wei(amount_a)).success(),
+            )
+            assert!(
+                call.send_value(addr: to_b, gas: ctx.gas(), value: wei(total - amount_a)).success(),
+            )
+            balances[owner] = 0
+            total
+        }
+
+        BalanceOf { owner } -> u256 uses (balances) {
+            balances[owner]
+        }
+    }
+}

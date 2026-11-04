@@ -1,0 +1,45 @@
+use std::evm::{Address, Call, Ctx, wei}
+use std::evm::erc20
+
+/// Something that can dispatch one payout denominated in base units.
+///
+/// The associated effect row makes the caller provide exactly the capabilities
+/// required by the concrete asset implementation.
+pub trait Asset {
+    uses E
+    fn send(own self, to: Address, amount: u256) uses E
+}
+
+/// Native ETH, where `amount` is wei.
+pub struct Native {}
+
+pub fn native() -> Native {
+    Native {}
+}
+
+impl Asset for Native {
+    uses E = (ctx: Ctx, call: mut Call)
+
+    fn send(own self, to: Address, amount: u256) uses E {
+        let _ = self
+        assert!(
+            call.send_value(addr: to, gas: ctx.gas(), value: wei(amount)).success(),
+            "native payout failed",
+        )
+    }
+}
+
+/// ERC20-style asset. `amount` is the token's smallest unit.
+pub struct Erc20Asset { token: Address }
+
+pub fn erc20_asset(token: Address) -> Erc20Asset {
+    Erc20Asset { token }
+}
+
+impl Asset for Erc20Asset {
+    uses E = (ctx: Ctx, call: mut Call)
+
+    fn send(own self, to: Address, amount: u256) uses E {
+        erc20::safe_transfer(token: self.token, receiver: to, amount)
+    }
+}
