@@ -1,18 +1,17 @@
 # typed-cei
 
-**Move one checks-effects-interactions boundary from a review convention into a compiler-checked API: public ledger commits mint opaque payouts, and payout dispatch has `Ctx + Call` authority but no `Ledger` authority.**
+**Move one checks-effects-interactions boundary from a review convention into a compiler-checked API. The ledger debits before calls, and payout dispatch has `Ctx + Call` authority but no `Ledger` authority.**
 
-`typed-cei` is a small Fe 26.5 library plus a worked ETH vault. It does not claim to make arbitrary Fe code reentrancy-safe. It makes a narrower property hard to violate when code uses the library: a caller cannot forge a payout, cannot dispatch the same payout twice, and cannot widen an asset adapter's dispatch effects to include the ledger.
+`typed-cei` is a small Fe 26.5 library with ETH and ERC20 vaults and an auction-refund example. It does not make arbitrary Fe code reentrancy-safe. Callers cannot forge a payout, dispatch the same payout twice, or widen an asset adapter's dispatch effects to include the ledger. A one-call withdrawal keeps a simple payout inside the library until dispatch.
 
 ```text
-commit_withdraw(...)  uses (ledger: mut Ledger)
-        │
-        └──> Payout<Native>       private fields; caller cannot forge it
-                  │
-                  └──> dispatch() uses (Ctx, mut Call); no Ledger effect
+withdraw_and_dispatch(...) → debit → send, all inside one call
+
+commit_withdraw(...)       → Payout<Native> → dispatch()
+                               private fields   consumes value
 ```
 
-The repository includes a deliberately vulnerable vault, a hand-written CEI baseline, a persistent-storage reentrancy guard, a real reentrant attacker, exact compile-fail diagnostics, and a reproducible gas comparison.
+The repository includes a deliberately vulnerable vault, hand-written CEI, persistent and transient reentrancy guards, a callback attacker, exact compile-fail diagnostics, and a reproducible gas comparison.
 
 ## Why this exists
 
@@ -34,7 +33,7 @@ balances[owner] = 0
 
 `VulnerableVault` does exactly that, compiles on Fe 26.5.0, and is drained by the runtime attacker in this repository.
 
-The library adds a second boundary after Fe's built-in access checking. Its trusted accounting module owns the `Payout` constructor. The only public commit functions in that module debit storage before returning a payout. Code outside the module can hold and consume that value, but cannot construct one directly.
+The library adds a second boundary after Fe's built-in access checking. Its trusted accounting module owns the `Payout` constructor. Public commit functions debit storage before returning a payout. Code outside the module can hold and consume it, but cannot construct one directly. Simple withdrawals use a single library function that commits and dispatches without returning a capability.
 
 ## The core pattern
 
@@ -76,20 +75,56 @@ This fixed trait signature is important. Third-party asset adapters are allowed,
 
 Two adapters are included: `Native` sends wei with `Call::send_value`; `Erc20Asset` uses `std::evm::erc20::safe_transfer`.
 
+The default single-payout path does not return a discardable value:
+
+```fe
+pub fn withdraw_and_dispatch<A: Asset>(owner: Address, to: Address, asset: own A) -> u256
+uses (ledger: mut Ledger, ctx: Ctx, call: mut Call)
+{
+    let payout = commit_withdraw(owner, to, asset)
+    let amount = payout.amount()
+    payout.dispatch()
+    amount
+}
+```
+
+The debit and external call execute in one transaction. A failed transfer reverts the debit. `Payout` remains public for splits and batches.
+
 ## Worked vault
 
 `TypedVault` supports payable `deposit()`, `withdraw(address)`, `withdrawSplit(address,address,uint256)`, and `balanceOf(address)`.
 
-The normal withdrawal is deliberately small:
+The normal withdrawal is one library call:
 
 ```fe
-let payout = commit_withdraw(owner: ctx.caller(), to, asset: native())
-let amount = payout.amount()
-payout.dispatch()
-amount
+withdraw_and_dispatch(owner: ctx.caller(), to, asset: native())
 ```
 
 `commit_split` shows composition: one committed debit can return two independently consumable payouts, then both interactions happen after the ledger write.
+
+## ERC20 deposit and payout
+
+`TokenVault` requires an ERC20 allowance and calls `safe_transfer_from`. It reads `balanceOf(vault)` before and after the call, then credits the positive difference. It never credits the amount requested without checking receipt.
+
+```fe
+let before: u256 = call.call(
+    addr: token, gas: ctx.gas(), value: Wei::zero(),
+    message: TokenBalanceQuery::BalanceOf { owner: ctx.address() },
+)
+erc20::safe_transfer_from(token: token, owner: ctx.caller(), receiver: ctx.address(), amount)
+let after: u256 = call.call(
+    addr: token, gas: ctx.gas(), value: Wei::zero(),
+    message: TokenBalanceQuery::BalanceOf { owner: ctx.address() },
+)
+assert!(after > before, "no tokens received")
+credit(owner: ctx.caller(), amount: after - before)
+```
+
+The mock token charges a 10% transfer fee. A deposit request for 100 units credits 90. Withdrawing that claim sends 90 gross units and the recipient receives 81 after the token's outbound fee. A fully taxed deposit reverts without credit. The vault assumes a truthful `balanceOf` and does not support rebasing or adversarial tokens.
+
+## Auction refund
+
+`RefundAuction` credits an outbid participant's previous bid and lets that participant pull the refund through `withdraw_and_dispatch`. It uses the same `Ledger` and `Native` adapter without a vault. It is a refund example, not a complete auction settlement protocol.
 
 ## What the compiler rejects
 
@@ -107,6 +142,46 @@ amount
 
 The last row is deliberately labeled as a Fe feature, not a library invention. `typed-cei` addresses the separate ordering gap after storage accesses have closed.
 
+## Migration from manual CEI
+
+Start with a hand-written withdrawal that debits before calling out:
+
+```fe
+Withdraw { to } -> u256 uses (ctx, mut call, mut balances) {
+    let owner = ctx.caller()
+    let amount = balances[owner]
+    assert!(amount > 0, "nothing to withdraw")
+    balances[owner] = 0
+    assert!(
+        call.send_value(addr: to, gas: ctx.gas(), value: wei(amount)).success(),
+    )
+    amount
+}
+```
+
+Change the contract field from `mut balances: StorageMap<Address, u256>` to `mut ledger: Ledger`. Replace the deposit's direct map increment with `credit(owner: ctx.caller(), amount: ctx.value().as_wei())`. Then replace the withdrawal body with:
+
+```fe
+Withdraw { to } -> u256 uses (ctx, mut call, mut ledger) {
+    withdraw_and_dispatch(owner: ctx.caller(), to, asset: native())
+}
+```
+
+The one-call path handles the simple case. For split payouts, call `commit_split` once and dispatch both returned values after the debit. Keep all other business state consistent before an external call; the ledger type does not order unrelated fields.
+
+Compile-time checks after migration:
+
+| Mistake | Fe 26.5 diagnostic |
+| --- | --- |
+| Construct a payout or call its private constructor | `2-0003` (private) |
+| Dispatch a moved payout a second time | `16-0002` (moved value) |
+| Ignore a direct `Payout` return | `8-0082` (`must_use`) |
+| Call `dispatch` without `Ctx` and `Call` | `8-0036` (missing effects) |
+| Add `Ledger` effects to an asset adapter | `6-0009` (trait bound) |
+| Keep mutable storage access open across a call | `16-0001` (access conflict) |
+
+Run `FE_BIN=fe ./compile-fail/run.sh` to see all seven exact diagnostics, including the separate field-forgery fixture. An intentional discard through `let _ = commit_withdraw(...)` still compiles; the one-call path avoids exposing that value.
+
 ## Reentrancy demonstration
 
 The same attacker is used against four contracts. A victim deposits 2 ETH; the attacker deposits 1 ETH and requests two re-entry rounds. The attacker records each nested withdrawal attempt and whether it succeeded.
@@ -122,23 +197,33 @@ The hand-written CEI baseline is intentional: debit-before-call is safe without 
 
 `typed_split_commits_before_both_callbacks` separately sends both split payouts back to the attacker. It observes two callback attempts and zero successful nested withdrawals, covering the two-interaction path rather than only EOA recipients.
 
-There is also a mock ERC20 test that moves 250 token units through `Payout<Erc20Asset>` and verifies the receiver's token balance.
+The cross-function attack calls `withdrawSplit` from inside a `withdraw` payout callback. It first calls `balanceOf` to inspect the caller's claim:
+
+| Contract | Nested split attempts / successes | Claim read during callback | Vault ETH after attack |
+| --- | ---: | ---: | ---: |
+| `TypedVault` | 1 / 0 | 0 ETH | 2 ETH |
+| `ManualCeiVault` | 1 / 0 | 0 ETH | 2 ETH |
+| `GuardedVault` | 1 / 0 | 1 ETH | 2 ETH |
+| `VulnerableVault` | 2 / 2 | 1 ETH | 0 ETH |
+
+All four tests start with a 2 ETH victim claim and a 1 ETH attacker claim. The vulnerable contract becomes insolvent. A separate read-only callback test performs only `balanceOf`. It sees zero during typed/manual dispatch but the old 1 ETH value during guarded/vulnerable dispatch. A guard blocks mutation, not stale read-only observations.
 
 `discarding_payout_can_strand_committed_funds` is the negative boundary test: an intentionally wrong harness contract compiles with `let _ = commit_withdraw(...)`. It zeros a 1 ETH claim without paying it out, leaving that ETH stranded in the contract.
 
 ## Gas comparison
 
-The benchmark measures the remaining-gas delta (`before - evm.gas()`) around one optimized (`-O 2`) withdrawal call after each contract has already received the same 1 ETH deposit. All three pay the same empty-code recipient.
+The four `gas_*` tests deploy a vault, deposit 1 ETH, then withdraw to the same empty-code recipient **in one EVM test transaction**. The measured withdrawal delta is `before - evm.gas()` at `-O 2`. The table subtracts the storage refunds generated by that same test transaction.
 
-| Variant | Gross gas before refunds | Delta vs manual CEI |
-| --- | ---: | ---: |
-| hand-written CEI | 35,375 | baseline |
-| typed CEI | 35,409 | +34 (+0.10%) |
-| persistent `false → true → false` storage guard | 57,606 | +22,231 (+62.84%) |
+| Variant | Gross gas | SSTORE refund | Refund-adjusted net | Net delta vs manual |
+| --- | ---: | ---: | ---: | ---: |
+| hand-written CEI | 35,375 | 19,900 | 15,475 | baseline |
+| typed CEI, one call | 35,409 | 19,900 | 15,509 | +34 |
+| transient `TSlot<bool>` guard | 35,709 | 19,900 | 15,809 | +334 |
+| persistent `bool` guard | 57,606 | 39,800 | 17,806 | +2,331 |
 
-Three consecutive local runs produced the same numbers. The primary abstraction result is the absolute delta: typed CEI costs 34 gross gas over hand-written CEI in this benchmark. The shared value-transfer/new-account CALL costs dominate the total, which is why that 34-gas delta is only 0.10%.
+In this fixture, the ledger slot starts at zero, is written by the deposit, then reset by the withdrawal. EIP-2200/EIP-3529 credit 19,900 gas for that reset. The persistent guard also resets a zero-origin lock slot, earning another 19,900. The transient guard uses `TLOAD/TSTORE` and earns no lock refund. The test records create+deposit+withdraw gas; even this lower bound exceeds five times the refund for every variant, so the EIP-3529 20% refund cap does not bind.
 
-The storage-guard number is intentionally specific: it is the conventional persistent `bool` guard in `test_harness/src/guarded.fe`, not an optimized sentinel scheme and not Fe's transient-storage `Mutex`. The measured remaining-gas delta is gross execution gas; transaction-level SSTORE refunds are **not** subtracted. So the 62.84% figure is a gross-before-refunds comparison, not a claim about every reentrancy guard's net transaction cost.
+The net values are deterministic refund accounting from this EVM test, not separate transaction receipts. A real withdrawal in a later transaction has different storage history and refund limits. Neither the guard comparison nor the 34-gas typed overhead is a general EVM gas claim.
 
 Reproduce it with:
 
@@ -146,7 +231,7 @@ Reproduce it with:
 FE_BIN=fe ./scripts/measure-gas.py
 ```
 
-The script requires exactly three gas-sample events with distinct kinds 1, 2, and 3, and rejects missing, extra, or duplicate kinds.
+The script requires four distinct gas-sample events. It checks the refund cap against recorded gas use and rejects missing, duplicate, or unaccountable samples.
 
 ## Build, test, and demo
 
@@ -162,6 +247,7 @@ With Fe 26.5.0 on `PATH`:
 fe --version
 fe fmt --check
 fe fmt --check test_harness
+fe check
 fe test test_harness
 ./compile-fail/run.sh
 fe build
@@ -173,10 +259,13 @@ The shortest security demo is:
 ```sh
 fe test --filter vulnerable_control_is_drained_by_reentrancy test_harness
 fe test --filter typed_cei_preserves_solvency_under_same_attack test_harness
+fe test --filter cross_function_ test_harness
+fe test --filter readonly_callback_ test_harness
+fe test --filter erc20_ test_harness
 ./compile-fail/run.sh
 ```
 
-Expected: both runtime tests pass, and all seven compile-fail cases print `PASS`.
+Expected: all selected runtime tests pass, and all seven compile-fail cases print `PASS`.
 
 ## Architecture
 
@@ -185,14 +274,17 @@ Expected: both runtime tests pass, and all seven compile-fail cases print `PASS`
 | `src/ledger.fe` | private payout construction and ledger commits |
 | `src/assets.fe` | generic fixed-effect asset interface; native ETH and ERC20 adapters |
 | `src/vault.fe` | worked typed-CEI vault |
+| `src/token_vault.fe` | ERC20 transfer-in accounting and payout |
+| `src/auction.fe` | typed auction-refund example |
 | `test_harness/src/manual.fe` | hand-written CEI control |
 | `test_harness/src/vulnerable.fe` | interaction-before-effect exploit control |
 | `test_harness/src/guarded.fe` | persistent-storage lock comparison |
-| `test_harness/src/lib.fe` | attacker, mock ERC20, discard witness, functional tests, gas samples |
+| `test_harness/src/transient.fe` | `TSlot<bool>` guard comparison |
+| `test_harness/src/lib.fe` | attacker, fee token, discard witness, functional tests, gas samples |
 | `compile-fail/` | bad programs plus exact expected compiler diagnostics |
-| `scripts/measure-gas.py` | reproducible three-way gas comparison |
+| `scripts/measure-gas.py` | reproducible four-way gross and net comparison |
 
-The root ingot's public surface exports only the typed vault, ledger/payout API, and asset API. Vulnerable, manual, guarded, attacker, and mock-token contracts live in the separate `test_harness` ingot, so a normal `fe build` of the library does not ship those controls.
+The root ingot exports the three worked contracts, ledger/payout API, and asset API. Vulnerable, manual, guarded, transient, attacker, and mock-token contracts live in `test_harness`; a normal `fe build` does not ship those controls.
 
 ## What the types do not prevent
 
@@ -200,11 +292,11 @@ This is a narrow pattern, not a smart-contract verifier.
 
 - A contract author can bypass the library and use raw `Call` directly. The compiler does not globally require every external call to consume a `Payout`.
 - The trusted accounting module itself must remain correct. Module privacy prevents outside code from forging `Payout`, but it does not prove that future edits inside `ledger.fe` keep the constructor after the debit.
-- `#[must_use]` rejects an immediately ignored payout, but Fe is affine here, not fully linear. Code can bind a payout and never dispatch it, or explicitly write `let _ = ...`; the `DiscardVault` test compiles and shows this can strand a committed 1 ETH claim even though it cannot duplicate the payout.
+- Fe 26.5 does not enforce full linearity: `let _ = commit_withdraw(...)` can still discard a committed payout, so simple withdrawals should use `withdraw_and_dispatch` instead.
 - The pattern ties one ledger debit to one or more payout capabilities. It does not require every other state update in a handler to happen before interaction. Cross-function invariants, fees, counters, authorization, oracle logic, and recipient correctness remain application concerns.
 - The fixed `Asset` effect row prevents an adapter from directly requiring `Ledger`, but the adapter still has `Call` and can invoke arbitrary external code. Application-level reentrancy and callback policy still matter beyond the protected ledger claim.
 - `credit` / `commit_*` are low-level accounting primitives that accept an explicit `owner`. The worked vault binds that owner to `ctx.caller()`; other callers must enforce their own authorization before using the primitives.
-- The worked contract is an ETH vault. ERC20 payout dispatch is tested with a local mock token; a production token vault would also need transfer-in accounting and token-specific policy.
+- The ERC20 vault checks received balances but assumes a truthful, non-rebasing token. Transfer fees on outgoing payouts reduce the amount the recipient receives.
 - Fe 26.5 is explicitly not production-ready. This is a contest prototype and security-pattern experiment, not audited production code.
 
 ## Fe-specific pieces that carry real weight
