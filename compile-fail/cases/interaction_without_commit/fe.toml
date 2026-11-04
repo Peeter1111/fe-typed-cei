@@ -1,0 +1,6 @@
+[ingot]
+name = "interaction_without_commit"
+version = "0.1.0"
+
+[dependencies]
+typed_cei = { path = "../../.." }

@@ -1,5 +1,121 @@
-use ingot::{TypedVault, VaultMsg}
-use std::evm::ether
+use ingot::{
+    GuardedVault,
+    Ledger,
+    TypedVault,
+    VaultMsg,
+    VulnerableVault,
+    balance_of,
+    commit_withdraw,
+    credit,
+    erc20_asset,
+}
+use std::evm::{StorageMap, ether}
+
+msg AttackMsg {
+    #[selector = sol("attack(uint256)")]
+    Attack { rounds: u256 },
+}
+
+msg MockTokenMsg {
+    #[selector = sol("transfer(address,uint256)")]
+    Transfer { to: Address, amount: u256 } -> bool,
+    #[selector = sol("balanceOf(address)")]
+    BalanceOf { owner: Address } -> u256,
+}
+
+contract MockToken uses (ctx: Ctx) {
+    mut balances: StorageMap<Address, u256>,
+
+    init(owner: Address, supply: u256) uses (mut balances) { balances[owner] = supply }
+
+    recv MockTokenMsg {
+        Transfer { to, amount } -> bool uses (ctx, mut balances) {
+            let owner = ctx.caller()
+            assert!(balances[owner] >= amount)
+            balances[owner] -= amount
+            balances[to] += amount
+            true
+        }
+
+        BalanceOf { owner } -> u256 uses (balances) {
+            balances[owner]
+        }
+    }
+}
+
+msg TokenVaultMsg {
+    #[selector = 0x11111111]
+    Credit { amount: u256 },
+    #[selector = 0x22222222]
+    Withdraw { to: Address } -> u256,
+}
+
+contract TokenPayoutDemo uses (ctx: Ctx, call: mut Call) {
+    token: Address,
+    mut ledger: Ledger,
+
+    init(token_: Address) uses (mut token) { token = token_ }
+
+    recv TokenVaultMsg {
+        Credit { amount } uses (ctx, mut ledger) {
+            credit(owner: ctx.caller(), amount)
+        }
+
+        Withdraw { to } -> u256 uses (ctx, mut call, token, mut ledger) {
+            let payout = commit_withdraw(owner: ctx.caller(), to, asset: erc20_asset(token))
+            let amount = payout.amount()
+            payout.dispatch()
+            amount
+        }
+    }
+}
+
+contract ReentrantAttacker uses (ctx: Ctx, call: mut Call) {
+    target: Address,
+    mut remaining: u256,
+
+    init(target_: Address) uses (mut target) { target = target_ }
+
+    recv AttackMsg {
+        #[payable]
+        Attack { rounds } uses (ctx, mut call, target, mut remaining) {
+            remaining = rounds
+            call.call(
+                addr: target,
+                gas: ctx.gas(),
+                value: ctx.value(),
+                message: VaultMsg::Deposit {},
+            )
+            let _: u256 = call
+                .call(
+                    addr: target,
+                    gas: ctx.gas(),
+                    value: Wei::zero(),
+                    message: VaultMsg::Withdraw { to: ctx.address() },
+                )
+        }
+    }
+
+    recv {
+        #[payable]
+        _ uses (ctx, mut call, target, mut remaining) {
+            if remaining > 0 {
+                remaining -= 1
+                // A failed reentrant withdrawal is the expected safe outcome.
+                let _ = call
+                    .try_call(
+                        addr: target,
+                        gas: ctx.gas(),
+                        value: Wei::zero(),
+                        message: VaultMsg::Withdraw { to: ctx.address() },
+                    )
+            }
+        }
+    }
+}
+
+#[event]
+struct GasSample { kind: u256, gas: u256 }
 
 #[test(balance = 10_000_000_000_000_000_000)]
 fn typed_vault_deposit_withdraws_once() uses (evm: mut Evm) {
@@ -43,4 +159,170 @@ fn typed_vault_split_is_committed_before_both_calls() uses (evm: mut Evm) {
     assert!(total == ether(2).as_wei())
     assert!(evm.balance(a) == ether(1) / 2)
     assert!(evm.balance(b) == ether(1) + ether(1) / 2)
+}
+
+#[test]
+fn generic_payout_dispatches_erc20_style_asset() uses (evm: mut Evm) {
+    let supply: u256 = 1000
+    let token = evm.create2<MockToken>(value: Wei::zero(), args: (evm.address(), supply), salt: 3)
+    let vault = evm.create2<TokenPayoutDemo>(value: Wei::zero(), args: (token,), salt: 4)
+    let moved: bool = evm
+        .call(
+            addr: token,
+            gas: 300000,
+            value: Wei::zero(),
+            message: MockTokenMsg::Transfer { to: vault, amount: 250 },
+        )
+    assert!(moved)
+    evm.call(
+        addr: vault,
+        gas: 100000,
+        value: Wei::zero(),
+        message: TokenVaultMsg::Credit { amount: 250 },
+    )
+
+    let receiver = Address::new(0xeeee)
+    let paid: u256 = evm
+        .call(
+            addr: vault,
+            gas: 400000,
+            value: Wei::zero(),
+            message: TokenVaultMsg::Withdraw { to: receiver },
+        )
+    let receiver_balance: u256 = evm
+        .call(
+            addr: token,
+            gas: 100000,
+            value: Wei::zero(),
+            message: MockTokenMsg::BalanceOf { owner: receiver },
+        )
+    assert!(paid == 250)
+    assert!(receiver_balance == 250)
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn vulnerable_control_is_drained_by_reentrancy() uses (evm: mut Evm) {
+    let vault = evm.create2<VulnerableVault>(value: Wei::zero(), args: (), salt: 10)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(2),
+        message: VaultMsg::Deposit {},
+    )
+    let attacker = evm.create2<ReentrantAttacker>(value: Wei::zero(), args: (vault,), salt: 11)
+    evm.call(
+        addr: attacker,
+        gas: 900000,
+        value: ether(1),
+        message: AttackMsg::Attack { rounds: 2 },
+    )
+
+    let victim_claim: u256 = evm
+        .call(
+            addr: vault,
+            gas: 100000,
+            value: Wei::zero(),
+            message: VaultMsg::BalanceOf { owner: evm.address() },
+        )
+    assert!(victim_claim == ether(2).as_wei())
+    assert!(evm.balance(vault) == Wei::zero())
+    assert!(evm.balance(attacker) == ether(3))
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn typed_cei_preserves_solvency_under_same_attack() uses (evm: mut Evm) {
+    let vault = evm.create2<TypedVault>(value: Wei::zero(), args: (), salt: 20)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(2),
+        message: VaultMsg::Deposit {},
+    )
+    let attacker = evm.create2<ReentrantAttacker>(value: Wei::zero(), args: (vault,), salt: 21)
+    evm.call(
+        addr: attacker,
+        gas: 900000,
+        value: ether(1),
+        message: AttackMsg::Attack { rounds: 2 },
+    )
+
+    let victim_claim: u256 = evm
+        .call(
+            addr: vault,
+            gas: 100000,
+            value: Wei::zero(),
+            message: VaultMsg::BalanceOf { owner: evm.address() },
+        )
+    assert!(victim_claim == ether(2).as_wei())
+    assert!(evm.balance(vault) == ether(2))
+    assert!(evm.balance(attacker) == ether(1))
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn storage_guard_also_blocks_attack() uses (evm: mut Evm) {
+    let vault = evm.create2<GuardedVault>(value: Wei::zero(), args: (), salt: 30)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(2),
+        message: VaultMsg::Deposit {},
+    )
+    let attacker = evm.create2<ReentrantAttacker>(value: Wei::zero(), args: (vault,), salt: 31)
+    evm.call(
+        addr: attacker,
+        gas: 900000,
+        value: ether(1),
+        message: AttackMsg::Attack { rounds: 2 },
+    )
+
+    let victim_claim: u256 = evm
+        .call(
+            addr: vault,
+            gas: 100000,
+            value: Wei::zero(),
+            message: VaultMsg::BalanceOf { owner: evm.address() },
+        )
+    assert!(victim_claim == ether(2).as_wei())
+    assert!(evm.balance(vault) == ether(2))
+    assert!(evm.balance(attacker) == ether(1))
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn gas_typed_withdraw() uses (evm: mut Evm, log: mut Log) {
+    let vault = evm.create2<TypedVault>(value: Wei::zero(), args: (), salt: 40)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(1),
+        message: VaultMsg::Deposit {},
+    )
+    let before = evm.gas()
+    let _: u256 = evm
+        .call(
+            addr: vault,
+            gas: 300000,
+            value: Wei::zero(),
+            message: VaultMsg::Withdraw { to: Address::new(0x4444) },
+        )
+    log.emit(GasSample { kind: 1, gas: before - evm.gas() })
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn gas_guarded_withdraw() uses (evm: mut Evm, log: mut Log) {
+    let vault = evm.create2<GuardedVault>(value: Wei::zero(), args: (), salt: 41)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(1),
+        message: VaultMsg::Deposit {},
+    )
+    let before = evm.gas()
+    let _: u256 = evm
+        .call(
+            addr: vault,
+            gas: 300000,
+            value: Wei::zero(),
+            message: VaultMsg::Withdraw { to: Address::new(0x4444) },
+        )
+    log.emit(GasSample { kind: 2, gas: before - evm.gas() })
 }

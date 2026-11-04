@@ -1,0 +1,8 @@
+error[8-0082]: unused value of type `Payout<Native>`
+  ┌─ src/lib.fe:4:5
+  │
+4 │     commit_withdraw(owner: Address::new(1), to: Address::new(2), asset: native())
+  │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ use this value or explicitly discard it with `let _ = ...`
+  │
+  = this type is marked `#[must_use]`
+

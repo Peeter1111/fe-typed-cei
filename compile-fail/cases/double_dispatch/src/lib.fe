@@ -1,0 +1,6 @@
+use typed_cei::{Native, Payout}
+
+fn dispatch_twice(payout: own Payout<Native>) uses (ctx: Ctx, call: mut Call) {
+    payout.dispatch()
+    payout.dispatch()
+}

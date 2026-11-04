@@ -1,0 +1,5 @@
+use typed_cei::{Ledger, commit_withdraw, native}
+
+fn ignore_payout() uses (ledger: mut Ledger) {
+    commit_withdraw(owner: Address::new(1), to: Address::new(2), asset: native())
+}

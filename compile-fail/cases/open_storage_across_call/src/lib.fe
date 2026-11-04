@@ -1,0 +1,9 @@
+pub contract BadOrdering uses (call: mut Call) {
+    mut balance: u256,
+
+    init() uses (mut call, mut balance) {
+        let held = mut balance
+        let _ = call.send_value(addr: Address::new(1), gas: 100000, value: Wei::zero())
+        held = 0
+    }
+}

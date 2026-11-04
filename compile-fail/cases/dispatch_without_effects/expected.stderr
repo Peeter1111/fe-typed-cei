@@ -1,0 +1,18 @@
+error[8-0036]: missing effect `Ctx` required by `dispatch`
+  ┌─ src/lib.fe:4:5
+  │
+4 │     payout.dispatch()
+  │     ^^^^^^^^^^^^^^^^^ `dispatch` requires effect `Ctx` to be in scope
+  │
+  = require it in this function's signature with `uses Ctx`, so that its callers provide it
+  = or provide it to a block of this function with `with (Ctx = value) { .. }`
+
+error[8-0036]: missing effect `Call` required by `dispatch`
+  ┌─ src/lib.fe:4:5
+  │
+4 │     payout.dispatch()
+  │     ^^^^^^^^^^^^^^^^^ `dispatch` requires effect `Call` to be in scope
+  │
+  = require it in this function's signature with `uses Call`, so that its callers provide it
+  = or provide it to a block of this function with `with (Call = value) { .. }`
+

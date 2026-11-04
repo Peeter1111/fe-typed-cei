@@ -1,0 +1,8 @@
+error[16-0002]: move conflict in `fn dispatch_twice`
+  ┌─ src/lib.fe:5:5
+  │
+4 │     payout.dispatch()
+  │     ------ value is moved here
+5 │     payout.dispatch()
+  │     ^^^^^^ cannot use a value after it was moved
+

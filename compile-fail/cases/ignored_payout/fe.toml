@@ -1,0 +1,6 @@
+[ingot]
+name = "ignored_payout"
+version = "0.1.0"
+
+[dependencies]
+typed_cei = { path = "../../.." }

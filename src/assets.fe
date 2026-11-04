@@ -1,11 +1,15 @@
 use std::evm::{Address, Call, Ctx, wei}
 use std::evm::erc20
 
+trait AssetSeal {}
+
 /// Something that can dispatch one payout denominated in base units.
 ///
 /// The associated effect row makes the caller provide exactly the capabilities
-/// required by the concrete asset implementation.
-pub trait Asset {
+/// required by the concrete asset implementation. The private supertrait seals
+/// implementations to this module, so an external asset cannot smuggle a
+/// `Ledger` effect into payout dispatch.
+pub trait Asset: AssetSeal {
     uses E
     fn send(own self, to: Address, amount: u256) uses E
 }
@@ -16,6 +20,8 @@ pub struct Native {}
 pub fn native() -> Native {
     Native {}
 }
+
+impl AssetSeal for Native {}
 
 impl Asset for Native {
     uses E = (ctx: Ctx, call: mut Call)
@@ -35,6 +41,8 @@ pub struct Erc20Asset { token: Address }
 pub fn erc20_asset(token: Address) -> Erc20Asset {
     Erc20Asset { token }
 }
+
+impl AssetSeal for Erc20Asset {}
 
 impl Asset for Erc20Asset {
     uses E = (ctx: Ctx, call: mut Call)

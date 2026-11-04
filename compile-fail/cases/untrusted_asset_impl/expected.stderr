@@ -1,0 +1,6 @@
+error[6-0003]: trait bound is not satisfied
+  ┌─ src/lib.fe:5:16
+  │
+5 │ impl Asset for EvilAsset {
+  │                ^^^^^^^^^ `EvilAsset` doesn't implement `AssetSeal`
+

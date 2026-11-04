@@ -23,4 +23,5 @@ jobs:
       - run: fe --version
       - run: fe fmt --check
       - run: fe test
+      - run: ./compile-fail/run.sh
       - run: fe build

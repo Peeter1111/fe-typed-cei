@@ -1,0 +1,5 @@
+use typed_cei::{Native, Payout, native}
+
+fn forged_payout() -> Payout<Native> {
+    Payout { asset: native(), to: Address::new(1), amount: 1 }
+}

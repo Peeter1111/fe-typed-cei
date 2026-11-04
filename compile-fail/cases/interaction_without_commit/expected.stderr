@@ -1,0 +1,33 @@
+error[2-0003]: `asset` is not visible
+   ┌─ src/lib.fe:4:14
+   │
+ 4 │     Payout { asset: native(), to: Address::new(1), amount: 1 }
+   │              ^^^^^^^^^^^^^^^ `asset` is not visible
+   │
+   ┌─ src/ledger.fe:12:24
+   │
+12 │ pub struct Payout<A> { asset: A, to: Address, amount: u256 }
+   │                        ----- `asset` is defined here
+
+error[2-0003]: `to` is not visible
+   ┌─ src/lib.fe:4:31
+   │
+ 4 │     Payout { asset: native(), to: Address::new(1), amount: 1 }
+   │                               ^^^^^^^^^^^^^^^^^^^ `to` is not visible
+   │
+   ┌─ src/ledger.fe:12:34
+   │
+12 │ pub struct Payout<A> { asset: A, to: Address, amount: u256 }
+   │                                  -- `to` is defined here
+
+error[2-0003]: `amount` is not visible
+   ┌─ src/lib.fe:4:52
+   │
+ 4 │     Payout { asset: native(), to: Address::new(1), amount: 1 }
+   │                                                    ^^^^^^^^^ `amount` is not visible
+   │
+   ┌─ src/ledger.fe:12:47
+   │
+12 │ pub struct Payout<A> { asset: A, to: Address, amount: u256 }
+   │                                               ------ `amount` is defined here
+

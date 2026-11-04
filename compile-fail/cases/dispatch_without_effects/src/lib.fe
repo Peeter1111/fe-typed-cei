@@ -1,0 +1,5 @@
+use typed_cei::{Native, Payout}
+
+fn dispatch_without_effects(payout: own Payout<Native>) {
+    payout.dispatch()
+}
