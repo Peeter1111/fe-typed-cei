@@ -1,0 +1,5 @@
+use typed_cei::{Payout, native}
+
+fn call_private_constructor() {
+    let _ = Payout::new(asset: native(), to: Address::new(1), amount: 1)
+}

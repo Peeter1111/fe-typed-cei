@@ -7,6 +7,8 @@ use typed_cei::{Ledger, TypedVault, VaultMsg, balance_of, commit_withdraw, credi
 msg AttackMsg {
     #[selector = sol("attack(uint256)")]
     Attack { rounds: u256 },
+    #[selector = sol("attackSplit(uint256,uint256)")]
+    AttackSplit { rounds: u256, amount_a: u256 },
     #[selector = sol("attempts()")]
     Attempts -> u256,
     #[selector = sol("successes()")]
@@ -96,6 +98,37 @@ contract ReentrantAttacker uses (ctx: Ctx, call: mut Call) {
                 )
         }
 
+        #[payable]
+        AttackSplit { rounds, amount_a } uses (
+            ctx,
+            mut call,
+            target,
+            mut remaining,
+            mut attempts,
+            mut successes,
+        ) {
+            remaining = rounds
+            attempts = 0
+            successes = 0
+            call.call(
+                addr: target,
+                gas: ctx.gas(),
+                value: ctx.value(),
+                message: VaultMsg::Deposit {},
+            )
+            let _: u256 = call
+                .call(
+                    addr: target,
+                    gas: ctx.gas(),
+                    value: Wei::zero(),
+                    message: VaultMsg::WithdrawSplit {
+                        to_a: ctx.address(),
+                        to_b: ctx.address(),
+                        amount_a,
+                    },
+                )
+        }
+
         Attempts -> u256 uses (attempts) {
             attempts
         }
@@ -180,6 +213,50 @@ fn typed_vault_split_pays_two_recipients() uses (evm: mut Evm) {
     assert!(total == ether(2).as_wei())
     assert!(evm.balance(a) == ether(1) / 2)
     assert!(evm.balance(b) == ether(1) + ether(1) / 2)
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn typed_split_commits_before_both_callbacks() uses (evm: mut Evm) {
+    let vault = evm.create2<TypedVault>(value: Wei::zero(), args: (), salt: 5)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(2),
+        message: VaultMsg::Deposit {},
+    )
+    let attacker = evm.create2<ReentrantAttacker>(value: Wei::zero(), args: (vault,), salt: 6)
+    evm.call(
+        addr: attacker,
+        gas: 900000,
+        value: ether(1),
+        message: AttackMsg::AttackSplit { rounds: 2, amount_a: ether(1).as_wei() / 2 },
+    )
+
+    let victim_claim: u256 = evm
+        .call(
+            addr: vault,
+            gas: 100000,
+            value: Wei::zero(),
+            message: VaultMsg::BalanceOf { owner: evm.address() },
+        )
+    let attempts: u256 = evm
+        .call(
+            addr: attacker,
+            gas: 100000,
+            value: Wei::zero(),
+            message: AttackMsg::Attempts {},
+        )
+    let successes: u256 = evm
+        .call(
+            addr: attacker,
+            gas: 100000,
+            value: Wei::zero(),
+            message: AttackMsg::Successes {},
+        )
+    assert!(victim_claim == ether(2).as_wei())
+    assert!(evm.balance(vault) == ether(2))
+    assert!(evm.balance(attacker) == ether(1))
+    assert!(attempts == 2 && successes == 0)
 }
 
 #[test]

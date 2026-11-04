@@ -26,3 +26,4 @@ jobs:
       - run: fe test test_harness
       - run: ./compile-fail/run.sh
       - run: fe build
+      - run: FE_BIN=fe ./scripts/measure-gas.py

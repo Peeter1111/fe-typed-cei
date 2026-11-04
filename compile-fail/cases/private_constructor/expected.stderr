@@ -1,0 +1,11 @@
+error[2-0003]: `new` is not visible
+   ┌─ src/lib.fe:4:21
+   │
+ 4 │     let _ = Payout::new(asset: native(), to: Address::new(1), amount: 1)
+   │                     ^^^ `new` is not visible
+   │
+   ┌─ src/ledger.fe:15:8
+   │
+15 │     fn new(asset: own A, to: Address, amount: u256) -> Self {
+   │        --- `new` is defined here
+
