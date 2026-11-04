@@ -124,6 +124,8 @@ The hand-written CEI baseline is intentional: debit-before-call is safe without 
 
 There is also a mock ERC20 test that moves 250 token units through `Payout<Erc20Asset>` and verifies the receiver's token balance.
 
+`discarding_payout_can_strand_committed_funds` is the negative boundary test: an intentionally wrong harness contract compiles with `let _ = commit_withdraw(...)`. It zeros a 1 ETH claim without paying it out, leaving that ETH stranded in the contract.
+
 ## Gas comparison
 
 The benchmark measures the remaining-gas delta (`before - evm.gas()`) around one optimized (`-O 2`) withdrawal call after each contract has already received the same 1 ETH deposit. All three pay the same empty-code recipient.
@@ -186,7 +188,7 @@ Expected: both runtime tests pass, and all seven compile-fail cases print `PASS`
 | `test_harness/src/manual.fe` | hand-written CEI control |
 | `test_harness/src/vulnerable.fe` | interaction-before-effect exploit control |
 | `test_harness/src/guarded.fe` | persistent-storage lock comparison |
-| `test_harness/src/lib.fe` | attacker, mock ERC20, functional tests, gas samples |
+| `test_harness/src/lib.fe` | attacker, mock ERC20, discard witness, functional tests, gas samples |
 | `compile-fail/` | bad programs plus exact expected compiler diagnostics |
 | `scripts/measure-gas.py` | reproducible three-way gas comparison |
 
@@ -198,7 +200,7 @@ This is a narrow pattern, not a smart-contract verifier.
 
 - A contract author can bypass the library and use raw `Call` directly. The compiler does not globally require every external call to consume a `Payout`.
 - The trusted accounting module itself must remain correct. Module privacy prevents outside code from forging `Payout`, but it does not prove that future edits inside `ledger.fe` keep the constructor after the debit.
-- `#[must_use]` rejects an immediately ignored payout, but Fe is affine here, not fully linear. Code can bind a payout and never dispatch it, or explicitly write `let _ = ...`; that can strand a committed claim even though it cannot duplicate the payout.
+- `#[must_use]` rejects an immediately ignored payout, but Fe is affine here, not fully linear. Code can bind a payout and never dispatch it, or explicitly write `let _ = ...`; the `DiscardVault` test compiles and shows this can strand a committed 1 ETH claim even though it cannot duplicate the payout.
 - The pattern ties one ledger debit to one or more payout capabilities. It does not require every other state update in a handler to happen before interaction. Cross-function invariants, fees, counters, authorization, oracle logic, and recipient correctness remain application concerns.
 - The fixed `Asset` effect row prevents an adapter from directly requiring `Ledger`, but the adapter still has `Call` and can invoke arbitrary external code. Application-level reentrancy and callback policy still matter beyond the protected ledger claim.
 - `credit` / `commit_*` are low-level accounting primitives that accept an explicit `owner`. The worked vault binds that owner to `ctx.caller()`; other callers must enforce their own authorization before using the primitives.

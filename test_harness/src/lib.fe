@@ -2,7 +2,16 @@ use ingot::guarded::GuardedVault
 use ingot::manual::ManualCeiVault
 use ingot::vulnerable::VulnerableVault
 use std::evm::{StorageMap, ether}
-use typed_cei::{Ledger, TypedVault, VaultMsg, balance_of, commit_withdraw, credit, erc20_asset}
+use typed_cei::{
+    Ledger,
+    TypedVault,
+    VaultMsg,
+    balance_of,
+    commit_withdraw,
+    credit,
+    erc20_asset,
+    native,
+}
 
 msg AttackMsg {
     #[selector = sol("attack(uint256)")]
@@ -65,6 +74,36 @@ contract TokenPayoutDemo uses (ctx: Ctx, call: mut Call) {
             let amount = payout.amount()
             payout.dispatch()
             amount
+        }
+    }
+}
+
+// Limitation witness: #[must_use] is not a linearity guarantee. Explicitly
+// discarding a committed payout compiles, but strands the vault's ETH.
+msg DropMsg {
+    #[selector = sol("deposit()")]
+    Deposit,
+    #[selector = sol("discard()")]
+    Discard,
+    #[selector = sol("balanceOf(address)")]
+    BalanceOf { owner: Address } -> u256,
+}
+
+contract DiscardVault uses (ctx: Ctx) {
+    mut ledger: Ledger,
+
+    recv DropMsg {
+        #[payable]
+        Deposit uses (ctx, mut ledger) {
+            credit(owner: ctx.caller(), amount: ctx.value().as_wei())
+        }
+
+        Discard uses (ctx, mut ledger) {
+            let _ = commit_withdraw(owner: ctx.caller(), to: ctx.caller(), asset: native())
+        }
+
+        BalanceOf { owner } -> u256 uses (ledger) {
+            balance_of(owner)
         }
     }
 }
@@ -190,6 +229,32 @@ fn typed_vault_deposit_withdraws_once() uses (evm: mut Evm) {
         )
             .success(),
     )
+}
+
+#[test(balance = 10_000_000_000_000_000_000)]
+fn discarding_payout_can_strand_committed_funds() uses (evm: mut Evm) {
+    let vault = evm.create2<DiscardVault>(value: Wei::zero(), args: (), salt: 50)
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: ether(1),
+        message: DropMsg::Deposit {},
+    )
+    evm.call(
+        addr: vault,
+        gas: 300000,
+        value: Wei::zero(),
+        message: DropMsg::Discard {},
+    )
+    let claim: u256 = evm
+        .call(
+            addr: vault,
+            gas: 100000,
+            value: Wei::zero(),
+            message: DropMsg::BalanceOf { owner: evm.address() },
+        )
+    assert!(claim == 0)
+    assert!(evm.balance(vault) == ether(1))
 }
 
 #[test(balance = 10_000_000_000_000_000_000)]

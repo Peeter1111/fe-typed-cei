@@ -79,6 +79,8 @@ The vulnerable vault records two successful nested withdrawals, pays the attacke
 
 A separate split-payout attack sends both post-commit payouts to the attacker and records two callbacks with zero successful nested withdrawals.
 
+The `DiscardVault` limitation test confirms that `let _ = commit_withdraw(...)` still compiles and can strand 1 ETH: the payout is consumed by neither dispatch nor a compiler-enforced linearity rule.
+
 At `-O 2`, gross remaining-gas deltas before transaction-level refunds are 35,375 for hand-written CEI, 35,409 for typed CEI (+34 / +0.10%), and 57,606 for the persistent `false→true→false` guard. The +34 gas absolute delta is the primary typed-vs-manual result; the shared value-transfer/new-account CALL cost dominates the percentage. The guard result is not a claim about transient or optimized guards.
 
 ## Limitations
