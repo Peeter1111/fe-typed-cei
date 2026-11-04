@@ -1,11 +1,10 @@
-use ingot::vault::VaultMsg
-use std::evm::StorageMap
-use std::evm::wei
+use std::evm::{StorageMap, wei}
+use typed_cei::VaultMsg
 
-/// Deliberately wrong control: interaction happens before the debit.
-/// Fe accepts this because the copied `amount` closes the storage read before CALL.
-pub contract VulnerableVault uses (ctx: Ctx, call: mut Call) {
+/// Conventional comparison: persistent `locked` slot plus interaction-first code.
+pub contract GuardedVault uses (ctx: Ctx, call: mut Call) {
     mut balances: StorageMap<Address, u256>,
+    mut locked: bool,
 
     recv VaultMsg {
         #[payable]
@@ -13,7 +12,9 @@ pub contract VulnerableVault uses (ctx: Ctx, call: mut Call) {
             balances[ctx.caller()] += ctx.value().as_wei()
         }
 
-        Withdraw { to } -> u256 uses (ctx, mut call, mut balances) {
+        Withdraw { to } -> u256 uses (ctx, mut call, mut balances, mut locked) {
+            assert!(!locked, "reentrant")
+            locked = true
             let owner = ctx.caller()
             let amount = balances[owner]
             assert!(amount > 0, "nothing to withdraw")
@@ -22,12 +23,15 @@ pub contract VulnerableVault uses (ctx: Ctx, call: mut Call) {
                 "native payout failed",
             )
             balances[owner] = 0
+            locked = false
             amount
         }
 
         WithdrawSplit { to_a, to_b, amount_a } -> u256
-        uses (ctx, mut call, mut balances)
+        uses (ctx, mut call, mut balances, mut locked)
         {
+            assert!(!locked, "reentrant")
+            locked = true
             let owner = ctx.caller()
             let total = balances[owner]
             assert!(total > 0 && amount_a <= total)
@@ -38,6 +42,7 @@ pub contract VulnerableVault uses (ctx: Ctx, call: mut Call) {
                 call.send_value(addr: to_b, gas: ctx.gas(), value: wei(total - amount_a)).success(),
             )
             balances[owner] = 0
+            locked = false
             total
         }
 

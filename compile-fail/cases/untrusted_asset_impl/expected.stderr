@@ -1,6 +1,6 @@
-error[6-0003]: trait bound is not satisfied
-  ┌─ src/lib.fe:5:16
+error[6-0009]: method has stricter bounds than trait
+  ┌─ src/lib.fe:6:8
   │
-5 │ impl Asset for EvilAsset {
-  │                ^^^^^^^^^ `EvilAsset` doesn't implement `AssetSeal`
+6 │     fn send(own self, to: Address, amount: u256)
+  │        ^^^^ method has stricter bounds than the declared method in the trait: `ledger: EffectRef<Ledger>`
 

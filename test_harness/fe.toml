@@ -1,0 +1,6 @@
+[ingot]
+name = "typed_cei_harness"
+version = "0.1.0"
+
+[dependencies]
+typed_cei = { path = ".." }

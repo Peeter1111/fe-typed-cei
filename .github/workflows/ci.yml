@@ -22,6 +22,7 @@ jobs:
           echo "$HOME/.fe/bin" >> "$GITHUB_PATH"
       - run: fe --version
       - run: fe fmt --check
-      - run: fe test
+      - run: fe fmt --check test_harness
+      - run: fe test test_harness
       - run: ./compile-fail/run.sh
       - run: fe build

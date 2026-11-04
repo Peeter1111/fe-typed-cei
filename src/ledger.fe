@@ -24,7 +24,7 @@ impl<A> Payout<A> {
 impl<A: Asset> Payout<A> {
     /// Consume the committed payout and perform the external interaction.
     /// No `Ledger` effect is present here.
-    pub fn dispatch(own self) uses A::E {
+    pub fn dispatch(own self) uses (ctx: Ctx, call: mut Call) {
         self.asset.send(to: self.to, amount: self.amount)
     }
 }
@@ -39,7 +39,7 @@ pub fn credit(owner: Address, amount: u256) uses (ledger: mut Ledger) {
 }
 
 /// Debit first, then return the only value the payout layer accepts.
-pub fn commit_withdraw<A>(owner: Address, to: Address, asset: own A) -> Payout<A>
+pub fn commit_withdraw<A: Asset>(owner: Address, to: Address, asset: own A) -> Payout<A>
 uses (ledger: mut Ledger)
 {
     let amount = ledger.balances[owner]
@@ -49,7 +49,7 @@ uses (ledger: mut Ledger)
 }
 
 /// Commit one debit and mint two independently consumable interactions.
-pub fn commit_split<A, B>(
+pub fn commit_split<A: Asset, B: Asset>(
     owner: Address,
     to_a: Address,
     to_b: Address,

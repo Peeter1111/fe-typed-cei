@@ -4,7 +4,7 @@ error[8-0036]: missing effect `Ctx` required by `dispatch`
 4 │     payout.dispatch()
   │     ^^^^^^^^^^^^^^^^^ `dispatch` requires effect `Ctx` to be in scope
   │
-  = require it in this function's signature with `uses Ctx`, so that its callers provide it
+  = require it in this function's signature with `uses (ctx: Ctx)`, so that its callers provide it
   = or provide it to a block of this function with `with (Ctx = value) { .. }`
 
 error[8-0036]: missing effect `Call` required by `dispatch`
@@ -13,6 +13,6 @@ error[8-0036]: missing effect `Call` required by `dispatch`
 4 │     payout.dispatch()
   │     ^^^^^^^^^^^^^^^^^ `dispatch` requires effect `Call` to be in scope
   │
-  = require it in this function's signature with `uses Call`, so that its callers provide it
+  = require it in this function's signature with `uses (call: mut Call)`, so that its callers provide it
   = or provide it to a block of this function with `with (Call = value) { .. }`
 

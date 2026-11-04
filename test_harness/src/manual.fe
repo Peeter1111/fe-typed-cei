@@ -1,0 +1,48 @@
+use std::evm::{StorageMap, wei}
+use typed_cei::VaultMsg
+
+/// Hand-written CEI baseline: debit storage before making the external call.
+/// It is safe against the demonstrated attack, but the ordering remains a code
+/// convention rather than an opaque-capability API.
+pub contract ManualCeiVault uses (ctx: Ctx, call: mut Call) {
+    mut balances: StorageMap<Address, u256>,
+
+    recv VaultMsg {
+        #[payable]
+        Deposit uses (ctx, mut balances) {
+            balances[ctx.caller()] += ctx.value().as_wei()
+        }
+
+        Withdraw { to } -> u256 uses (ctx, mut call, mut balances) {
+            let owner = ctx.caller()
+            let amount = balances[owner]
+            assert!(amount > 0, "nothing to withdraw")
+            balances[owner] = 0
+            assert!(
+                call.send_value(addr: to, gas: ctx.gas(), value: wei(amount)).success(),
+                "native payout failed",
+            )
+            amount
+        }
+
+        WithdrawSplit { to_a, to_b, amount_a } -> u256
+        uses (ctx, mut call, mut balances)
+        {
+            let owner = ctx.caller()
+            let total = balances[owner]
+            assert!(total > 0 && amount_a <= total)
+            balances[owner] = 0
+            assert!(
+                call.send_value(addr: to_a, gas: ctx.gas(), value: wei(amount_a)).success(),
+            )
+            assert!(
+                call.send_value(addr: to_b, gas: ctx.gas(), value: wei(total - amount_a)).success(),
+            )
+            total
+        }
+
+        BalanceOf { owner } -> u256 uses (balances) {
+            balances[owner]
+        }
+    }
+}

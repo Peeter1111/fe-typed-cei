@@ -6,5 +6,3 @@
 pub use assets::{Asset, Erc20Asset, Native, erc20_asset, native}
 pub use ledger::{Ledger, Payout, balance_of, commit_split, commit_withdraw, credit}
 pub use vault::{TypedVault, VaultMsg}
-pub use guarded::GuardedVault
-pub use vulnerable::VulnerableVault

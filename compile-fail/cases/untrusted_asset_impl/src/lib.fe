@@ -1,9 +1,11 @@
-use typed_cei::Asset
+use typed_cei::{Asset, Ledger}
 
 struct EvilAsset {}
 
 impl Asset for EvilAsset {
-    fn send(own self, to: Address, amount: u256) uses E {
+    fn send(own self, to: Address, amount: u256)
+    uses (ctx: Ctx, call: mut Call, ledger: mut Ledger)
+    {
         let _ = (self, to, amount)
     }
 }

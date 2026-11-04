@@ -1,17 +1,12 @@
 use std::evm::{Address, Call, Ctx, wei}
 use std::evm::erc20
 
-trait AssetSeal {}
-
 /// Something that can dispatch one payout denominated in base units.
 ///
-/// The associated effect row makes the caller provide exactly the capabilities
-/// required by the concrete asset implementation. The private supertrait seals
-/// implementations to this module, so an external asset cannot smuggle a
-/// `Ledger` effect into payout dispatch.
-pub trait Asset: AssetSeal {
-    uses E
-    fn send(own self, to: Address, amount: u256) uses E
+/// Every implementation has the same fixed external-call authority. Fe rejects
+/// an implementation that tries to add another effect such as `Ledger`.
+pub trait Asset {
+    fn send(own self, to: Address, amount: u256) uses (ctx: Ctx, call: mut Call)
 }
 
 /// Native ETH, where `amount` is wei.
@@ -21,12 +16,8 @@ pub fn native() -> Native {
     Native {}
 }
 
-impl AssetSeal for Native {}
-
 impl Asset for Native {
-    uses E = (ctx: Ctx, call: mut Call)
-
-    fn send(own self, to: Address, amount: u256) uses E {
+    fn send(own self, to: Address, amount: u256) uses (ctx: Ctx, call: mut Call) {
         let _ = self
         assert!(
             call.send_value(addr: to, gas: ctx.gas(), value: wei(amount)).success(),
@@ -42,12 +33,8 @@ pub fn erc20_asset(token: Address) -> Erc20Asset {
     Erc20Asset { token }
 }
 
-impl AssetSeal for Erc20Asset {}
-
 impl Asset for Erc20Asset {
-    uses E = (ctx: Ctx, call: mut Call)
-
-    fn send(own self, to: Address, amount: u256) uses E {
+    fn send(own self, to: Address, amount: u256) uses (ctx: Ctx, call: mut Call) {
         erc20::safe_transfer(token: self.token, receiver: to, amount)
     }
 }
